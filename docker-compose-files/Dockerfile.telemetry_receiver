@@ -1,5 +1,5 @@
 # ---------- Stage 1: Build all binaries ----------
-FROM golang:1.17 AS builder
+FROM golang:1.25.8 AS builder
 
 # Define user arguments
 ARG USER_ID=1000
@@ -17,7 +17,11 @@ RUN go mod download
 
 # Copy source code
 COPY ./cmd ./cmd
+COPY ./pkg ./pkg
 COPY ./internal ./internal
+
+# Tidy and download dependencies after source is available
+RUN go mod tidy && go mod download
 
 # Build all binaries
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /build/dbdiscauth ./cmd/dbdiscauth

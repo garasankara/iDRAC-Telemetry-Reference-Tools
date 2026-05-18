@@ -60,11 +60,10 @@ func (m *StompMessagebus) SendMessageWithHeaders(message []byte, queue string, h
 }
 
 func (m *StompMessagebus) ReceiveMessage(message chan<- string, queue string) (messagebus.Subscription, error) {
-	sub, err := m.conn.Subscribe(queue, stomp.AckClient)
+	sub, err := m.conn.Subscribe(queue, stomp.AckAuto)
 	if err != nil {
 		return nil, err
 	}
-
 	m.subs = append(m.subs, sub)
 
 	go m.RecieveLoop(sub, message)
@@ -83,10 +82,6 @@ func (m *StompMessagebus) RecieveLoop(sub *stomp.Subscription, message chan<- st
 			continue
 		}
 		message <- string(msg.Body)
-		err := m.conn.Ack(msg)
-		if err != nil {
-			log.Printf("ACK failed! %v", err)
-		}
 	}
 }
 
@@ -101,5 +96,8 @@ func (m *StompMessagebus) Close() error {
 }
 
 func (m *StompSubscription) Close() error {
+	if !m.sub.Active() {
+		return nil
+	}
 	return m.sub.Unsubscribe()
 }

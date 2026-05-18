@@ -49,28 +49,15 @@ func handleGroups(writeAPI api.WriteAPI, groupsChan chan *databus.DataGroup) {
 			writeAPI.WritePoint(p)
 
 			if group.Label == "Redfish LifeCycle Events" {
-                                log.Printf("Measurement - RLCE\n")
-                                r := write.NewPointWithMeasurement("redfishlce").
-                                        AddTag("RedfishSystem", value.System).
-                                        AddTag("RedfishContext", value.Context).
-                                        AddTag("RedfishLabel", value.Label).
-                                        AddTag("EventId", value.ID).
-                                        AddField("EventType", value.EventType).
-                                        AddField("MaxBandwidthPercent", value.MaxBandwidthPercent).
-                                        AddField("MinBandwidthPercent", value.MinBandwidthPercent).
-                                        AddField("DiscardedPkts", value.DiscardedPkts).
-                                        AddField("RxBroadcast", value.RxBroadcast).
-                                        AddField("RxBytes", value.RxBytes).
-                                        AddField("RxErrorPktAlignmentErrors", value.RxErrorPktAlignmentErrors).
-                                        AddField("RxMulticastPackets", value.RxMulticastPackets).
-                                        AddField("RxUnicastPackets", value.RxUnicastPackets).
-                                        AddField("TxBytes", value.TxBytes).
-                                        AddField("TxMutlicastPackets", value.TxMutlicastPackets).
-                                        AddField("TxUnicastPackets", value.TxUnicastPackets).
-                                        AddField("TxBroadcast", value.TxBroadcast).
-                                        SetTime(timestamp)
-                        // automatically batches things behind the scenes
-                                writeAPI.WritePoint(r)
+				log.Printf("Measurement - RLCE\n")
+				r := write.NewPointWithMeasurement("redfishlce").
+					AddTag("RedfishSystem", value.System).
+					AddTag("RedfishContext", value.Context).
+					AddTag("RedfishLabel", value.Label).
+					AddTag("EventId", value.ID).
+					SetTime(timestamp)
+					// automatically batches things behind the scenes
+				writeAPI.WritePoint(r)
 			}
 		}
 	}
@@ -100,7 +87,7 @@ func main() {
 	//Gather configuration from environment variables
 	getEnvSettings()
 
-	dbClient := new(databus.DataBusClient)
+	var dbClient *databus.DataBusClient
 	stompPort, _ := strconv.Atoi(configStrings["mbport"])
 	for {
 		mb, err := stomp.NewStompMessageBus(configStrings["mbhost"], stompPort)
@@ -108,7 +95,7 @@ func main() {
 			log.Printf("Could not connect to message bus: %s", err)
 			time.Sleep(5 * time.Second)
 		} else {
-			dbClient.Bus = mb
+			dbClient = databus.NewDataBusClient(mb, "influxpump")
 			defer mb.Close()
 			break
 		}

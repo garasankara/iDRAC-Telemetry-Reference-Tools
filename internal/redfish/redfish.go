@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/iDRAC-Telemetry-Reference-Tools/internal/auth"
 	"github.com/dell/iDRAC-Telemetry-Reference-Tools/internal/sse"
 )
 
@@ -23,6 +24,27 @@ const (
 	evtSSEFilter    = "?$filter=EventFormatType%20eq%20Event"
 	evtSSEFilter17G = "?$filter=EventType%20eq%20%27Alert%27"
 )
+
+type RedfishClientInterface interface {
+	GetEventsSSE(Ctx context.Context, event chan<- *RedfishEvent, sseURI string) error
+	GetInventoryByUri(sseURI string) (*RedfishPayload, error)
+	GetLceSSE(Ctx context.Context, event chan<- *RedfishEvent, sseURI string) error
+	GetSSEByUri(event chan<- *RedfishEvent, sseURI string)
+	GetSysInfo() (hostname string, sku string, model string, fwver string, fqdn string, imgid string, err error)
+	GetSystemId() (string, error)
+	GetUri(uri string) (*RedfishPayload, error)
+	ListenForAlerts(Ctx context.Context, event chan<- *RedfishEvent)
+	ListenForLceEvents(Ctx context.Context, event chan<- *RedfishEvent)
+	ListenForMetricReports(Ctx context.Context, event chan<- *RedfishEvent)
+	StartSSE(Ctx context.Context, event chan<- *RedfishEvent, sseURI string) error
+	Walk() map[string]*RedfishPayload
+	addAuthToRequest(req *http.Request)
+	walkUri(uri string, res *map[string]*RedfishPayload)
+	GetHostname() string
+	SetFwVer(ver string)
+	GetUsername() string
+	GetPassword() string
+}
 
 type RedfishClient struct {
 	Hostname    string
@@ -34,28 +56,157 @@ type RedfishClient struct {
 	FwVer       string
 }
 
+type IRCRedfishClient struct {
+	RedfishClient
+}
+
+type iDRACRedfishClient struct {
+	RedfishClient
+}
+
+func (i *IRCRedfishClient) GetSystemId() (string, error) {
+	managersIRC, err := i.GetUri("/redfish/v1/Managers/IRC")
+	if err != nil {
+		return "", err
+	}
+	if managersIRC.Object["Oem"] != nil {
+		//log.Printf("%s: Has Oem elem!", r.Hostname)
+		oem := i.valueToPayload(managersIRC.Object["Oem"])
+		if oem.Object["Dell"] != nil {
+			dell := i.valueToPayload(oem.Object["Dell"])
+			//log.Printf("%s: Has Oem/Dell elem! %v", r.Hostname, dell)
+			if dell.Object["ServiceTag"] != nil {
+				return dell.Object["ServiceTag"].(string), nil
+			}
+		}
+	}
+
+	chassisIRC, err := i.GetUri("/redfish/v1/Chassis/IRC")
+	if chassisIRC.Object["SerialNumber"] != nil {
+		return chassisIRC.Object["SerialNumber"].(string), nil
+	}
+
+	return "", errors.New("Unable to determine System ID - IRC")
+}
+
+func (i *IRCRedfishClient) valueToPayload(value any) *RedfishPayload {
+	ret := new(RedfishPayload)
+	ret.Client = &i.RedfishClient
+	switch v := value.(type) {
+	case map[string]interface{}:
+		ret.Object = v
+	case []interface{}:
+		ret.Array = v
+	case float64:
+		ret.Float = v
+	default:
+		log.Fatalf("Unknown type %T", v)
+	}
+	return ret
+}
+
+func (i *IRCRedfishClient) GetSysInfo() (hostname, sku, model, fwver, fqdn, imgid string, err error) {
+	// serviceRoot, err := i.GetUri("/redfish/v1/Systems/System.Embedded.1?$select=HostName,SKU,Model")
+	// if err != nil {
+	// 	return
+	// }
+	// //TODO: update to IRC
+	// if serviceRoot.Object["HostName"] != nil {
+	// 	hostname = serviceRoot.Object["HostName"].(string)
+	// }
+	// if serviceRoot.Object["SKU"] != nil {
+	// 	sku = serviceRoot.Object["SKU"].(string)
+	// }
+	// if serviceRoot.Object["Model"] != nil {
+	// 	model = serviceRoot.Object["Model"].(string)
+	// }
+
+	serviceRoot, err := i.GetUri("/redfish/v1/Managers/IRC/EthernetInterfaces/mgmt0?$select=IPv4Addresses")
+	if err != nil {
+		return
+	}
+	log.Printf("serviceroot IPv4Addresses %v", serviceRoot)
+	//IRC
+	if serviceRoot.Object["IPv4Addresses"] != nil {
+		ips := i.valueToPayload(serviceRoot.Object["IPv4Addresses"])
+		log.Printf("IPv4Addresses %v", ips)
+		if len(ips.Array) > 0 {
+			ipInfo := i.valueToPayload(ips.Array[0])
+			log.Printf("ipInfo %v", ipInfo)
+			if ipInfo.Object["Address"] != nil {
+				fqdn = ipInfo.Object["Address"].(string)
+			}
+		}
+	}
+
+	// serviceRoot, err = i.GetUri("/redfish/v1/Managers/iDRAC.Embedded.1?$select=FirmwareVersion,Links")
+	// if err != nil {
+	// 	return
+	// }
+	//iDRAC
+	// if serviceRoot.Object["FirmwareVersion"] != nil {
+	// 	fwver = serviceRoot.Object["FirmwareVersion"].(string)
+	// }
+
+	// if serviceRoot.Object["Links"] != nil {
+	// 	act, ok := serviceRoot.Object["Links"].(map[string]interface{})["ActiveSoftwareImage"]
+	// 	if ok {
+	// 		imgid = act.(map[string]interface{})["@odata.id"].(string)
+	// 		if imgid != "" {
+	// 			imgid = imgid[strings.LastIndex(imgid, "/")+1:]
+	// 		}
+	// 	}
+	// }
+	return
+}
+
 type RedfishEvent struct {
 	Err     error
 	ID      string
 	Payload *RedfishPayload
 }
 
-func Init(hostname string, username string, password string) (*RedfishClient, error) {
-	ret := new(RedfishClient)
-	ret.Hostname = hostname
-	ret.Username = username
-	ret.Password = password
+func Init(hostname string, username string, password string, serviceType int) (RedfishClientInterface, error) {
+	var ret RedfishClientInterface
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
+	switch serviceType {
+	case auth.IRC:
+		ret = &IRCRedfishClient{
+			RedfishClient: RedfishClient{
+				Hostname:   hostname,
+				Username:   username,
+				Password:   password,
+				HttpClient: &http.Client{Transport: tr},
+			},
+		}
+	case auth.IDRAC:
+		ret = &iDRACRedfishClient{
+			RedfishClient: RedfishClient{
+				Hostname:   hostname,
+				Username:   username,
+				Password:   password,
+				HttpClient: &http.Client{Transport: tr},
+			},
+		}
+	default:
+		ret = &RedfishClient{
+			Hostname:   hostname,
+			Username:   username,
+			Password:   password,
+			HttpClient: &http.Client{Transport: tr},
+		}
+	}
+
 	//Allow a max of 5 connections in the http client connection pool
 	//tr.MaxIdleConns = 5
 	//tr.MaxIdleConnsPerHost = 5
-	ret.HttpClient = &http.Client{Transport: tr}
+	// ret.HttpClient = &http.Client{Transport: tr}
 	_, err := ret.GetUri("/redfish/v1")
 	if err != nil {
 		log.Print("Failed to init redfish client: ", err)
-		return nil, err
+		return ret, err
 	}
 	return ret, nil
 }
@@ -73,6 +224,22 @@ func InitBearer(hostname string, token string) (*RedfishClient, error) {
 		return nil, err
 	}
 	return ret, nil
+}
+
+func (r *RedfishClient) GetHostname() string {
+	return r.Hostname
+}
+
+func (r *RedfishClient) SetFwVer(ver string) {
+	r.FwVer = ver
+}
+
+func (r *RedfishClient) GetUsername() string {
+	return r.Username
+}
+
+func (r *RedfishClient) GetPassword() string {
+	return r.Password
 }
 
 func (r *RedfishClient) addAuthToRequest(req *http.Request) {
@@ -237,10 +404,12 @@ func (r *RedfishClient) ListenForAlerts(Ctx context.Context, event chan<- *Redfi
 		if err == nil {
 			if eventService.Object["ServerSentEventUri"] != nil {
 				sseUri := "https://" + r.Hostname + eventService.Object["ServerSentEventUri"].(string)
+
 				filter := evtSSEFilter
 				if strings.Compare(r.FwVer, "4.00.00.00") < 0 {
 					filter = evtSSEFilter17G
 				}
+
 				ret.Err = r.StartSSE(Ctx, event, sseUri+filter)
 
 			} else {
@@ -315,6 +484,10 @@ func (r *RedfishClient) ListenForLceEvents(Ctx context.Context, event chan<- *Re
 
 func (r *RedfishClient) StartSSE(Ctx context.Context, event chan<- *RedfishEvent, sseURI string) error {
 	sseConfig := new(sse.Config)
+	sseConfig.RetryParams = sse.RetryParams{
+		RetryInterval: 5 * time.Second,
+		MaxRetries:    10,
+	}
 	sseConfig.Client = r.HttpClient
 	//iDRAC version
 	filter := mrSSEFilter
